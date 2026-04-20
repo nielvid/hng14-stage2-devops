@@ -1,15 +1,17 @@
 const express = require('express');
 const axios = require('axios');
 const path = require('path');
+const config = require('./config');
 const app = express();
 
-const API_URL = "http://localhost:8000";
+const API_URL = config.apiUrl
 
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'views')));
 
 app.post('/submit', async (req, res) => {
   try {
+    console.log("I got here",   req.body);
     const response = await axios.post(`${API_URL}/jobs`);
     res.json(response.data);
   } catch (err) {
@@ -26,6 +28,6 @@ app.get('/status/:id', async (req, res) => {
   }
 });
 
-app.listen(3000, () => {
-  console.log('Frontend running on port 3000');
+app.listen(config.appPort, () => {
+  console.log(`Frontend running on port ${config.appPort}`);;
 });

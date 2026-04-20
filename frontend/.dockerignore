@@ -1,0 +1,15 @@
+# Dependencies (reinstalled during build)
+node_modules
+
+# Dev/editor artifacts
+.env
+.env.*
+*.md
+.git
+.gitignore
+Dockerfile
+eslint.config.js
+
+# Test artifacts
+coverage
+*.lcov

@@ -1,0 +1,216 @@
+name: CI/CD
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+env:
+  REGISTRY: localhost:5000
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Python lint (flake8)
+        run: |
+          pip install flake8
+          flake8 api/ worker/ --max-line-length=120
+
+      - name: JS lint (eslint)
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run lint
+
+      - name: Dockerfile lint (hadolint)
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: api/Dockerfile
+      - uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: worker/Dockerfile
+      - uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: frontend/Dockerfile
+
+  test:
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install fastapi httpx pytest pytest-cov redis uvicorn -r api/requirements.txt
+
+      - name: Run tests with coverage
+        working-directory: api
+        run: pytest tests/ --cov=. --cov-report=xml --cov-report=term
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: api/coverage.xml
+
+  build:
+    runs-on: ubuntu-latest
+    needs: test
+    services:
+      registry:
+        image: registry:2
+        ports:
+          - 5000:5000
+    outputs:
+      sha: ${{ steps.meta.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: meta
+        run: echo "sha=${GITHUB_SHA::8}" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push all images
+        run: |
+          SHA=${{ steps.meta.outputs.sha }}
+          for svc in api worker frontend; do
+            docker build -t $REGISTRY/$svc:$SHA -t $REGISTRY/$svc:latest ./$svc
+            docker push $REGISTRY/$svc:$SHA
+            docker push $REGISTRY/$svc:latest
+          done
+
+  security:
+    runs-on: ubuntu-latest
+    needs: build
+    services:
+      registry:
+        image: registry:2
+        ports:
+          - 5000:5000
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: meta
+        run: echo "sha=${GITHUB_SHA::8}" >> "$GITHUB_OUTPUT"
+
+      - name: Rebuild images for scanning
+        run: |
+          SHA=${{ steps.meta.outputs.sha }}
+          for svc in api worker frontend; do
+            docker build -t $REGISTRY/$svc:$SHA ./$svc
+          done
+
+      - name: Install Trivy
+        run: |
+          curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin
+
+      - name: Scan images
+        run: |
+          SHA=${{ steps.meta.outputs.sha }}
+          for svc in api worker frontend; do
+            trivy image \
+              --exit-code 1 \
+              --severity CRITICAL \
+              --format sarif \
+              --output trivy-$svc.sarif \
+              $REGISTRY/$svc:$SHA
+          done
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: trivy-sarif
+          path: "*.sarif"
+
+  integration:
+    runs-on: ubuntu-latest
+    needs: security
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Start stack
+        run: |
+          docker compose up --build -d
+          docker compose ps
+
+      - name: Wait for stack healthy
+        run: |
+          for i in $(seq 1 30); do
+            healthy=$(docker compose ps --format json | python3 -c "
+          import sys, json
+          services = [json.loads(l) for l in sys.stdin if l.strip()]
+          print(all(s.get('Health','') in ('healthy','') for s in services))
+          ")
+            [ "$healthy" = "True" ] && break
+            sleep 5
+          done
+
+      - name: Integration test
+        run: |
+          # Submit a job through the frontend
+          JOB_ID=$(curl -sf -X POST http://localhost:3000/submit | python3 -c "import sys,json; print(json.load(sys.stdin)['job_id'])")
+          echo "Job ID: $JOB_ID"
+
+          # Poll until completed or timeout (60s)
+          for i in $(seq 1 30); do
+            STATUS=$(curl -sf http://localhost:3000/status/$JOB_ID | python3 -c "import sys,json; print(json.load(sys.stdin)['status'])")
+            echo "Status: $STATUS"
+            [ "$STATUS" = "completed" ] && break
+            sleep 2
+          done
+
+          [ "$STATUS" = "completed" ] || { echo "Job did not complete"; exit 1; }
+
+      - name: Tear down
+        if: always()
+        run: docker compose down -v
+
+  deploy:
+    runs-on: ubuntu-latest
+    needs: integration
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    env:
+      DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+      DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+      DEPLOY_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rolling deploy
+        run: |
+          SHA=${GITHUB_SHA::8}
+          eval "$(ssh-agent -s)"
+          echo "$DEPLOY_KEY" | ssh-add -
+
+          ssh -o StrictHostKeyChecking=no $DEPLOY_USER@$DEPLOY_HOST bash -s << EOF
+          set -e
+          cd ~/app
+
+          for svc in api worker frontend; do
+            OLD=\$(docker ps -q --filter "name=\${svc}")
+            docker pull $REGISTRY/\${svc}:$SHA
+
+            # Start new container alongside old
+            NEW_NAME="\${svc}_new_$SHA"
+            docker run -d --name \$NEW_NAME \
+              --network app_internal \
+              --env-file .env \
+              $REGISTRY/\${svc}:$SHA
+
+            # Wait up to 60s for health
+            for i in \$(seq 1 12); do
+              HEALTH=\$(docker inspect --format='{{.State.Health.Status}}' \$NEW_NAME 2>/dev/null || echo "none")
+              [ "\$HEALTH" = "healthy" ] && break
+              [ \$i -eq 12 ] && { echo "Health check failed for \$svc, aborting"; docker rm -f \$NEW_NAME; exit 1; }
+              sleep 5
+            done
+
+            # Stop old container only after new is healthy
+            [ -n "\$OLD" ] && docker stop \$OLD && docker rm \$OLD
+            docker rename \$NEW_NAME \$svc
+          done
+          EOF

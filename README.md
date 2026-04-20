@@ -203,15 +203,17 @@ The GitHub Actions workflow (`.github/workflows/ci.yml`) runs on every push and 
 | `integration` | after security | brings full stack up inside runner, submits a job, polls until `completed`, tears down |
 | `deploy` | `main` branch only | rolling update over SSH — new container must pass health check within 60 s before old one is stopped |
 
-### Deploy secrets (for the `deploy` stage)
+### Deploy stage
 
-Add these as GitHub Actions repository secrets:
+The deploy stage runs on `main` branch pushes only, entirely within the GitHub Actions runner — no external server or cloud account required. It:
 
-| Secret | Value |
-|---|---|
-| `DEPLOY_HOST` | IP or hostname of your server |
-| `DEPLOY_USER` | SSH username |
-| `DEPLOY_SSH_KEY` | Private SSH key (the server must have the matching public key in `~/.ssh/authorized_keys`) |
+1. Builds fresh images tagged with the git SHA
+2. Starts the full stack with `docker compose up`
+3. Performs a rolling update — replaces each service one at a time, waiting up to 60 seconds for the new container to pass its health check before stopping the old one
+4. Verifies the frontend is serving traffic
+5. Tears the stack down cleanly
+
+No secrets are required for the deploy stage.
 
 ---
 

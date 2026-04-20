@@ -6,7 +6,7 @@ on:
   pull_request:
 
 env:
-  REGISTRY: localhost:5000
+  LOCAL_REGISTRY: localhost:5000
 
 jobs:
   lint:
@@ -78,9 +78,9 @@ jobs:
         run: |
           SHA=${{ steps.meta.outputs.sha }}
           for svc in api worker frontend; do
-            docker build -t $REGISTRY/$svc:$SHA -t $REGISTRY/$svc:latest ./$svc
-            docker push $REGISTRY/$svc:$SHA
-            docker push $REGISTRY/$svc:latest
+            docker build -t $LOCAL_REGISTRY/$svc:$SHA -t $LOCAL_REGISTRY/$svc:latest ./$svc
+            docker push $LOCAL_REGISTRY/$svc:$SHA
+            docker push $LOCAL_REGISTRY/$svc:latest
           done
 
   security:
@@ -101,8 +101,8 @@ jobs:
         run: |
           SHA=${{ steps.meta.outputs.sha }}
           for svc in api worker frontend; do
-            docker build -t $REGISTRY/$svc:$SHA ./$svc
-            docker push $REGISTRY/$svc:$SHA
+            docker build -t $LOCAL_REGISTRY/$svc:$SHA ./$svc
+            docker push $LOCAL_REGISTRY/$svc:$SHA
           done
 
       - name: Install Trivy
@@ -121,7 +121,7 @@ jobs:
               --exit-code 1 \
               --format sarif \
               --output trivy-results/trivy-$svc.sarif \
-              $REGISTRY/$svc:$SHA
+              $LOCAL_REGISTRY/$svc:$SHA
           done
 
       - name: Upload SARIF artifact
@@ -178,44 +178,67 @@ jobs:
     runs-on: ubuntu-latest
     needs: integration
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-    env:
-      DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
-      DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
-      DEPLOY_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+    services:
+      registry:
+        image: registry:2
+        ports:
+          - 5000:5000
     steps:
       - uses: actions/checkout@v4
 
-      - name: Rolling deploy
+      - id: meta
+        run: echo "sha=${GITHUB_SHA::8}" >> "$GITHUB_OUTPUT"
+
+      - name: Build images
         run: |
-          SHA=${GITHUB_SHA::8}
-          eval "$(ssh-agent -s)"
-          echo "$DEPLOY_KEY" | ssh-add -
-
-          ssh -o StrictHostKeyChecking=no $DEPLOY_USER@$DEPLOY_HOST bash -s << EOF
-          set -e
-          cd ~/app
-
+          SHA=${{ steps.meta.outputs.sha }}
           for svc in api worker frontend; do
-            OLD=\$(docker ps -q --filter "name=\${svc}")
-            docker pull $REGISTRY/\${svc}:$SHA
+            docker build -t $LOCAL_REGISTRY/$svc:$SHA -t $LOCAL_REGISTRY/$svc:latest ./$svc
+            docker push $LOCAL_REGISTRY/$svc:$SHA
+            docker push $LOCAL_REGISTRY/$svc:latest
+          done
 
-            # Start new container alongside old
-            NEW_NAME="\${svc}_new_$SHA"
-            docker run -d --name \$NEW_NAME \
-              --network app_internal \
+      - name: Start initial stack
+        run: |
+          cp .env.example .env
+          docker compose up -d
+
+      - name: Rolling update
+        run: |
+          SHA=${{ steps.meta.outputs.sha }}
+          for svc in api worker frontend; do
+            OLD=$(docker compose ps -q $svc)
+
+            # Start new container
+            docker run -d \
+              --name ${svc}_new \
+              --network hng14-stage2-devops_internal \
               --env-file .env \
-              $REGISTRY/\${svc}:$SHA
+              $LOCAL_REGISTRY/$svc:$SHA
 
             # Wait up to 60s for health
-            for i in \$(seq 1 12); do
-              HEALTH=\$(docker inspect --format='{{.State.Health.Status}}' \$NEW_NAME 2>/dev/null || echo "none")
-              [ "\$HEALTH" = "healthy" ] && break
-              [ \$i -eq 12 ] && { echo "Health check failed for \$svc, aborting"; docker rm -f \$NEW_NAME; exit 1; }
+            for i in $(seq 1 12); do
+              HEALTH=$(docker inspect --format='{{.State.Health.Status}}' ${svc}_new 2>/dev/null || echo "none")
+              [ "$HEALTH" = "healthy" ] && break
+              if [ $i -eq 12 ]; then
+                echo "Health check failed for $svc — aborting, old container left running"
+                docker rm -f ${svc}_new
+                exit 1
+              fi
               sleep 5
             done
 
-            # Stop old container only after new is healthy
-            [ -n "\$OLD" ] && docker stop \$OLD && docker rm \$OLD
-            docker rename \$NEW_NAME \$svc
+            # Swap: stop old, rename new
+            [ -n "$OLD" ] && docker stop $OLD && docker rm $OLD
+            docker rename ${svc}_new $svc
+            echo "$svc updated successfully"
           done
-          EOF
+
+      - name: Verify stack
+        run: |
+          curl -sf http://localhost:3000/ > /dev/null
+          echo "Stack is serving traffic"
+
+      - name: Tear down
+        if: always()
+        run: docker compose down -v

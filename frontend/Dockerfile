@@ -1,18 +1,16 @@
 # syntax=docker/dockerfile:1
-FROM node:20-slim AS builder
+FROM node:20-alpine AS builder
 WORKDIR /build
 COPY package*.json ./
-# Install all deps (including dev) so the lock file is fully satisfied,
-# then prune to production-only for the final image.
 RUN npm ci && npm prune --omit=dev
 
-FROM node:20-slim
+FROM node:20-alpine
 WORKDIR /app
 COPY --from=builder /build/node_modules ./node_modules
 COPY app.js config.js ./
 COPY views ./views
 
-RUN useradd -r -u 1001 appuser
+RUN adduser -D -u 1001 appuser
 USER appuser
 
 EXPOSE 3000

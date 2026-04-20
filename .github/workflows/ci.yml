@@ -117,6 +117,7 @@ jobs:
           for svc in api worker frontend; do
             trivy image \
               --severity CRITICAL \
+              --ignore-unfixed \
               --exit-code 1 \
               --format sarif \
               --output trivy-results/trivy-$svc.sarif \

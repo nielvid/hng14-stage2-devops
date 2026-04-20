@@ -208,17 +208,15 @@ jobs:
       - name: Rolling update
         run: |
           SHA=${{ steps.meta.outputs.sha }}
-          for svc in api worker frontend; do
+          for svc in api worker; do
             OLD=$(docker compose ps -q $svc)
 
-            # Start new container
             docker run -d \
               --name ${svc}_new \
               --network hng14-stage2-devops_internal \
               --env-file .env \
               $LOCAL_REGISTRY/$svc:$SHA
 
-            # Wait up to 60s for health
             for i in $(seq 1 12); do
               HEALTH=$(docker inspect --format='{{.State.Health.Status}}' ${svc}_new 2>/dev/null || echo "none")
               [ "$HEALTH" = "healthy" ] && break
@@ -230,11 +228,23 @@ jobs:
               sleep 5
             done
 
-            # Swap: stop old, rename new
             [ -n "$OLD" ] && docker stop $OLD && docker rm $OLD
             docker rename ${svc}_new $svc
             echo "$svc updated successfully"
           done
+
+          # Frontend is updated via Compose to preserve the host port binding
+          docker compose up -d --no-deps --pull never frontend
+          for i in $(seq 1 12); do
+            HEALTH=$(docker inspect --format='{{.State.Health.Status}}' $(docker compose ps -q frontend) 2>/dev/null || echo "none")
+            [ "$HEALTH" = "healthy" ] && break
+            if [ $i -eq 12 ]; then
+              echo "Health check failed for frontend — aborting"
+              exit 1
+            fi
+            sleep 5
+          done
+          echo "frontend updated successfully"
 
       - name: Verify stack
         run: |

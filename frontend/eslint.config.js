@@ -1,8 +1,9 @@
-export default [
+module.exports = [
   {
     files: ["**/*.js"],
+    ignores: ["eslint.config.js"],
     rules: {
-      "no-unused-vars": "error",
+      "no-unused-vars": ["error", { "caughtErrorsIgnorePattern": "^_" }],
       "no-undef": "error",
       "eqeqeq": "error",
       "no-console": "off"

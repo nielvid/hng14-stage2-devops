@@ -100,3 +100,47 @@ Every bug found in the original codebase, in the order they were discovered.
 | **Line** | — (missing) |
 | **Problem** | Without a `.dockerignore`, the Docker build context sent to the daemon includes everything in the service directory: virtual environments, `node_modules`, test files, `.env` files, `__pycache__`, coverage reports, and `.git` metadata. This bloats the build context, slows builds, and risks copying sensitive files (e.g. a local `.env`) into the image. |
 | **Fix** | Added a `.dockerignore` to each service directory. Each file excludes: dev/editor artifacts (`.env`, `.env.*`, `*.md`, `.git`, `.gitignore`, `Dockerfile`), language-specific cache and build output (`__pycache__`, `*.pyc`, `node_modules`), and test/coverage artifacts (`tests/`, `.coverage`, `coverage.xml`, `.pytest_cache`, `eslint.config.js`). |
+
+---
+
+## Bug 10 — PEP 8 violations in `api/main.py` and `worker/worker.py`
+
+| Field | Detail |
+|---|---|
+| **Files** | `api/main.py`, `worker/worker.py` |
+| **Lines** | `main.py` 15, 22 — `worker.py` 11, 17, 20, 26, 31, 33 |
+| **Problem** | Multiple flake8 violations: missing two blank lines between top-level function definitions (E302), missing two blank lines after a function before module-level code (E305), a blank line containing trailing whitespace (W293), and no newline at end of file (W292). |
+| **Fix** | Added the required blank lines between all top-level definitions in both files, removed trailing whitespace from the blank line inside the `while` loop in `worker.py`, and added a trailing newline at end of file. |
+
+---
+
+## Bug 11 — ESLint config used ESM syntax in a CommonJS package
+
+| Field | Detail |
+|---|---|
+| **File** | `frontend/eslint.config.js` |
+| **Line** | 1 |
+| **Problem** | `eslint.config.js` used `export default [...]` (ESM) but `package.json` has no `"type": "module"`, so Node treats all `.js` files as CommonJS. ESLint failed to parse its own config with: `Parsing error: 'import' and 'export' may appear only with 'sourceType: module'`. |
+| **Fix** | Changed `export default [...]` to `module.exports = [...]` to match the package's CommonJS module type. |
+
+---
+
+## Bug 12 — ESLint linted its own config file and failed
+
+| Field | Detail |
+|---|---|
+| **File** | `frontend/eslint.config.js` |
+| **Line** | 1 |
+| **Problem** | ESLint attempted to lint `eslint.config.js` itself. The file uses `module` which was not listed in the declared globals, causing a `no-undef` error. |
+| **Fix** | Added `ignores: ["eslint.config.js"]` to the config so ESLint skips linting its own config file. |
+
+---
+
+## Bug 13 — Unused `err` variables in catch blocks
+
+| Field | Detail |
+|---|---|
+| **File** | `frontend/app.js` |
+| **Lines** | 17, 26 |
+| **Problem** | Both `catch (err)` blocks never referenced `err` — the handler only returns a generic error response. This triggered the `no-unused-vars` ESLint rule. |
+| **Fix** | Renamed both to `_err`. The underscore prefix is the conventional signal for an intentionally unused variable and is recognised by `no-unused-vars` as an allowed pattern. |
